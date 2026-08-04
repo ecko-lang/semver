@@ -1,0 +1,188 @@
+# Parsing and comparing versions, per Semantic Versioning 2.0.0.
+#
+# Written against the specification rather than a regex, because the fiddly
+# parts are the rules the regex hides: leading zeroes are forbidden in the
+# numeric fields and in numeric pre-release identifiers, but permitted in build
+# metadata; build metadata never affects precedence; and a numeric pre-release
+# identifier always ranks below an alphanumeric one.
+
+import std.string as str
+
+## The error every entry point raises for input that is not a version.
+export fn fail(message) {
+    error({ kind: "semver", message: message })
+}
+
+## Is `s` a run of one or more ASCII digits?
+export fn is_numeric(s) {
+    if s == "" { return false }
+    all(chars(s), fn(c) c >= "0" and c <= "9")
+}
+
+## Identifier characters allowed in a pre-release or build part: alphanumerics
+## and hyphen. Anything else - underscore, space, dot - ends the identifier.
+export fn is_ident(s) {
+    if s == "" { return false }
+    all(
+        chars(s),
+        fn(c) c >= "0" and c <= "9" or c >= "a" and c <= "z" or c >= "A" and c <= "Z" or c == "-",
+    )
+}
+
+## A numeric field of the version core. Rejects a leading zero, so "01.1.1" is
+## invalid rather than quietly becoming 1.1.1.
+export fn numeric_field(s, what) {
+    unless is_numeric(s) { fail("{what} must be a number, got '{s}'") }
+    if len(s) > 1 and first(chars(s)) == "0" { fail("{what} must not have a leading zero: '{s}'") }
+    int(s)
+}
+
+## Split a pre-release or build string on dots, checking each identifier.
+## Numeric pre-release identifiers become ints so they compare numerically;
+## build identifiers stay text, since build metadata is never compared.
+export fn identifiers(s, numeric_matters, what) {
+    if s == "" { fail("{what} must not be empty") }
+    parts = split(s, ".")
+    map(parts, fn(p) identifier(p, numeric_matters, what))
+}
+
+## One identifier from a dot-separated list.
+export fn identifier(p, numeric_matters, what) {
+    unless is_ident(p) { fail("{what} identifier '{p}' has a character outside [0-9A-Za-z-]") }
+    unless numeric_matters { return p }
+    unless is_numeric(p) { return p }
+    # Numeric identifiers must not carry a leading zero (spec §9).
+    if len(p) > 1 and first(chars(p)) == "0" { fail("{what} identifier '{p}' has a leading zero") }
+    int(p)
+}
+
+## parse("1.2.3-rc.1+build.5") -> { major, minor, patch, prerelease, build }.
+## Raises `{ kind: "semver" }` for anything that is not a valid version.
+export fn parse(text) {
+    unless type_of(text) == "string" { fail("a version must be a string") }
+    # Build metadata is separated first: it may itself contain hyphens, so
+    # splitting on "-" before "+" would mis-slice "1.0.0+exp.sha-1".
+    plus = split(text, "+")
+    if len(plus) > 2 { fail("more than one '+' in '{text}'") }
+    build = if len(plus) == 2 { identifiers(plus[1], false, "build metadata") } else { [] }
+
+    rest = plus[0]
+    dash = index_of(chars(rest), "-")
+    core = if dash < 0 { rest } else { join(take(chars(rest), dash), "") }
+    pre_text = if dash < 0 { null } else { join(drop(chars(rest), dash + 1), "") }
+    prerelease = if is_null(pre_text) { [] } else { identifiers(pre_text, true, "pre-release") }
+
+    nums = split(core, ".")
+    unless len(nums) == 3 { fail("a version needs major.minor.patch, got '{text}'") }
+    {
+        major: numeric_field(nums[0], "major"),
+        minor: numeric_field(nums[1], "minor"),
+        patch: numeric_field(nums[2], "patch"),
+        prerelease: prerelease,
+        build: build,
+    }
+}
+
+## Is `text` a valid version? The total form of `parse`.
+export fn valid(text) {
+    try {
+        _ = parse(text)
+        true
+    } catch (e) { false }
+}
+
+## Render a parsed version back to text, build metadata included.
+export fn string_of(p) {
+    core = "{p.major}.{p.minor}.{p.patch}"
+    pre = if len(p.prerelease) == 0 { "" } else { "-" + join(map(p.prerelease, string), ".") }
+    meta = if len(p.build) == 0 { "" } else { "+" + join(map(p.build, string), ".") }
+    core + pre + meta
+}
+
+# --- precedence --------------------------------------------------------------
+
+## -1, 0 or 1 for a < b, a == b, a > b.
+export fn cmp_int(a, b) {
+    if a < b { return -1 }
+    if a > b { return 1 }
+    0
+}
+
+## Compare two pre-release identifiers. Numeric always ranks below
+## alphanumeric, and two numerics compare as numbers (spec §11.4.3).
+export fn cmp_identifier(a, b) {
+    a_num = type_of(a) == "int"
+    b_num = type_of(b) == "int"
+    if a_num and b_num { return cmp_int(a, b) }
+    if a_num { return -1 }
+    if b_num { return 1 }
+    cmp_int(a, b)
+}
+
+## Compare two pre-release lists. An empty list means "this is a release",
+## which outranks any pre-release (§11.3); otherwise identifiers are compared
+## left to right and a longer list wins the tie (§11.4.4).
+export fn cmp_prerelease(a, b) {
+    if len(a) == 0 and len(b) == 0 { return 0 }
+    if len(a) == 0 { return 1 }
+    if len(b) == 0 { return -1 }
+    shared = if len(a) < len(b) { len(a) } else { len(b) }
+    for i in 0..shared {
+        c = cmp_identifier(a[i], b[i])
+        unless c == 0 { return c }
+    }
+    cmp_int(len(a), len(b))
+}
+
+## compare(a, b) -> -1, 0 or 1. Accepts text or already-parsed versions.
+## Build metadata is ignored, exactly as the spec requires (§10).
+export fn compare(a, b) {
+    x = if type_of(a) == "string" { parse(a) } else { a }
+    y = if type_of(b) == "string" { parse(b) } else { b }
+    for pair in [[x.major, y.major], [x.minor, y.minor], [x.patch, y.patch]] {
+        c = cmp_int(pair[0], pair[1])
+        unless c == 0 { return c }
+    }
+    cmp_prerelease(x.prerelease, y.prerelease)
+}
+
+## Ascending order by precedence.
+##
+## `sort_with` takes the comparator directly. `sort_by` could not express this:
+## a pre-release list mixes numeric and alphanumeric identifiers whose ordering
+## depends on their types, which is not a value any key function can return.
+export fn sort(versions) {
+    sort_with(versions, compare)
+}
+
+## a == b by precedence, ignoring build metadata.
+export fn eq(a, b) = compare(a, b) == 0
+
+## a > b by precedence.
+export fn gt(a, b) = compare(a, b) > 0
+
+## a < b by precedence.
+export fn lt(a, b) = compare(a, b) < 0
+
+## inc("1.2.3", "minor") -> "1.3.0". Bumping drops any pre-release and build
+## metadata: they described the version being left behind, not the new one.
+export fn inc(text, part) {
+    p = parse(text)
+    if part == "major" {
+        return string_of({ major: p.major + 1, minor: 0, patch: 0, prerelease: [], build: [] })
+    }
+    if part == "minor" {
+        return string_of(
+            { major: p.major, minor: p.minor + 1, patch: 0, prerelease: [], build: [] },
+        )
+    }
+    unless part == "patch" { fail("inc expects 'major', 'minor' or 'patch', got '{part}'") }
+    # A pre-release is already "before" its release, so patching 1.2.3-alpha
+    # lands on 1.2.3 rather than 1.2.4.
+    if len(p.prerelease) > 0 {
+        return string_of(
+            { major: p.major, minor: p.minor, patch: p.patch, prerelease: [], build: [] },
+        )
+    }
+    string_of({ major: p.major, minor: p.minor, patch: p.patch + 1, prerelease: [], build: [] })
+}

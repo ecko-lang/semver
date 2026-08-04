@@ -1,0 +1,85 @@
+# semver - the four things you actually do with versions.
+#
+# Runs offline and prints the same output every time.
+#
+#   ecko example.ecko
+
+import "./main.ecko" as semver
+
+# Ecko string interpolation has no format specifiers, so columns are padded
+# explicitly.
+fn pad(text, width) {
+    mut out = string(text)
+    while len(out) < width {
+        out = out + " "
+    }
+    out
+}
+
+# --- 1. is this a version at all? --------------------------------------------
+
+print("valid:")
+for text in ["1.2.3", "1.0.0-rc.1+build.5", "01.1.1", "1.2", "1.2.3-alpha_beta"] {
+    print("  {text} -> {semver.valid(text)}")
+}
+print("")
+
+# --- 2. which came first? -----------------------------------------------------
+
+# The worked example from the specification, shuffled and then sorted back.
+# Note where the traps are: beta.2 before beta.11 (numeric, not text), and
+# every pre-release before the release it leads to.
+shuffled = [
+    "1.0.0",
+    "1.0.0-beta.11",
+    "1.0.0-alpha",
+    "1.0.0-rc.1",
+    "1.0.0-beta.2",
+    "1.0.0-alpha.beta",
+    "1.0.0-beta",
+    "1.0.0-alpha.1",
+]
+print("sorted by precedence:")
+for text in semver.sort(shuffled) {
+    print("  {text}")
+}
+print("")
+
+# Build metadata is not part of the version, so these are the same release.
+print(
+    "1.0.0+build.1 vs 1.0.0+build.999 -> {semver.compare(\"1.0.0+build.1\", \"1.0.0+build.999\")}",
+)
+print("")
+
+# --- 3. does it satisfy a range? ----------------------------------------------
+
+print("satisfies:")
+for pair in [["1.9.3", "^1.2.0"], ["2.0.0", "^1.2.0"], ["0.3.0", "^0.2.3"], ["1.2.9", "~1.2.3"], ["1.5.0", ">=1.2.3 <2.0.0"], ["3.0.0", "^1.0.0 || ^3.0.0"], ["2.0.0-alpha", "^1.0.0"]] {
+    print(
+        "  " +
+            pad(pair[0], 12) +
+            " against " +
+            pad(pair[1], 20) +
+            " -> {semver.satisfies(pair[0], pair[1])}",
+    )
+}
+print("")
+print("  note the last one: a pre-release never satisfies a range that did not")
+print("  ask for one, so ^1.0.0 cannot quietly pull in 2.0.0-alpha.")
+print("")
+
+# --- 4. pick one --------------------------------------------------------------
+
+# The question `ecko get pkg@^1.2.0` has to answer: given the tags a repo
+# publishes, which one do we resolve to?
+tags = ["1.0.0", "1.2.0", "1.9.3", "2.0.0", "2.1.0", "2.2.0-rc.1"]
+print("published tags: {tags}")
+for range in ["^1.2.0", "^2.0.0", "~1.2.0", "^3.0.0"] {
+    print("  " + pad(range, 10) + " -> {semver.max_satisfying(tags, range)}")
+}
+print("")
+
+print("bumping 1.2.3:")
+for part in ["patch", "minor", "major"] {
+    print("  " + pad(part, 6) + " -> {semver.inc(\"1.2.3\", part)}")
+}

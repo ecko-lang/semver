@@ -1,0 +1,160 @@
+# Tests for the semver package - offline, deterministic (no ai/fs/net).
+#
+# The interesting cases come straight from the specification at semver.org
+# rather than from taste: §9 and §10 on what a pre-release and build metadata
+# may contain, and §11 on precedence, including the worked ordering example.
+import std.test
+import "../main.ecko"
+v = main
+
+# --- parsing -----------------------------------------------------------------
+
+test.case("parses the three required numbers", fn() {
+    p = v.parse("1.2.3")
+    test.eq(p.major, 1)
+    test.eq(p.minor, 2)
+    test.eq(p.patch, 3)
+    test.eq(p.prerelease, [])
+    test.eq(p.build, [])
+})
+
+test.case("parses a pre-release into dot-separated identifiers", fn() {
+    test.eq(v.parse("1.0.0-alpha.1").prerelease, ["alpha", 1])
+    test.eq(v.parse("1.0.0-0.3.7").prerelease, [0, 3, 7])
+    test.eq(v.parse("1.0.0-x.7.z.92").prerelease, ["x", 7, "z", 92])
+})
+
+test.case("parses build metadata, which is not part of the version", fn() {
+    test.eq(v.parse("1.0.0+20130313144700").build, ["20130313144700"])
+    test.eq(v.parse("1.0.0-beta+exp.sha.5114f85").prerelease, ["beta"])
+    test.eq(v.parse("1.0.0-beta+exp.sha.5114f85").build, ["exp", "sha", "5114f85"])
+})
+
+test.case("valid accepts the spec's examples and rejects malformed ones", fn() {
+    for good in ["0.0.4", "1.2.3", "10.20.30", "1.1.2-prerelease+meta", "1.0.0-alpha.beta", "1.0.0-alpha0.valid", "1.0.0-rc.1+build.1", "2.0.0+build.1848", "1.0.0-alpha-a.b-c-somethinglong+build.1-aef.1-its-okay"] {
+        test.ok(v.valid(good), "should be valid: {good}")
+    }
+    for bad in ["1", "1.2", "1.2.3-0123", "1.2.3-0123.0123", "1.1.2+.123", "+invalid", "-invalid", "alpha", "1.2.3.DEV", "1.2-SNAPSHOT", "1.2.31.2.3----RC-SNAPSHOT.12.09.1--..12+788", "-1.0.3-gamma+b7718", "01.1.1", "1.01.1", "1.1.01", "1.2.3-alpha_beta"] {
+        test.ok(v.valid(bad) == false, "should be invalid: {bad}")
+    }
+})
+
+test.case("parsing an invalid version raises kind semver", fn() {
+    caught = try { v.parse("not-a-version") } catch (e) { get(e, "kind") }
+    test.eq(caught, "semver")
+})
+
+# --- precedence --------------------------------------------------------------
+
+test.case("compare orders by major, then minor, then patch", fn() {
+    test.eq(v.compare("1.0.0", "2.0.0"), -1)
+    test.eq(v.compare("2.0.0", "2.1.0"), -1)
+    test.eq(v.compare("2.1.0", "2.1.1"), -1)
+    test.eq(v.compare("2.1.1", "2.1.1"), 0)
+    test.eq(v.compare("2.1.1", "2.1.0"), 1)
+})
+
+test.case("a pre-release sorts before its release (spec §11.3)", fn() {
+    test.eq(v.compare("1.0.0-alpha", "1.0.0"), -1)
+    test.eq(v.compare("1.0.0", "1.0.0-alpha"), 1)
+})
+
+test.case("the spec's worked precedence example holds end to end (§11.4)", fn() {
+    ordered = [
+        "1.0.0-alpha",
+        "1.0.0-alpha.1",
+        "1.0.0-alpha.beta",
+        "1.0.0-beta",
+        "1.0.0-beta.2",
+        "1.0.0-beta.11",
+        "1.0.0-rc.1",
+        "1.0.0",
+    ]
+    # Every neighbouring pair must be strictly ascending...
+    for i in 0..len(ordered) - 1 {
+        test.eq(v.compare(ordered[i], ordered[i + 1]), -1)
+    }
+    # ...and sorting the reverse must reproduce it exactly.
+    test.eq(v.sort(reverse(ordered)), ordered)
+})
+
+test.case("build metadata is ignored for precedence (spec §10)", fn() {
+    test.eq(v.compare("1.0.0+build.1", "1.0.0+build.999"), 0)
+    test.eq(v.compare("1.0.0-alpha+a", "1.0.0-alpha+b"), 0)
+})
+
+test.case("numeric pre-release identifiers compare numerically, not as text", fn() {
+    # The classic trap: as strings, "11" sorts before "2".
+    test.eq(v.compare("1.0.0-beta.2", "1.0.0-beta.11"), -1)
+    # And a numeric identifier always ranks below an alphanumeric one (§11.4.3).
+    test.eq(v.compare("1.0.0-1", "1.0.0-alpha"), -1)
+})
+
+test.case("a longer pre-release wins when all preceding parts are equal (§11.4.4)", fn() {
+    test.eq(v.compare("1.0.0-alpha", "1.0.0-alpha.1"), -1)
+})
+
+# --- ranges ------------------------------------------------------------------
+
+test.case("an exact version matches only itself", fn() {
+    test.ok(v.satisfies("1.2.3", "1.2.3"), "exact match")
+    test.ok(v.satisfies("1.2.4", "1.2.3") == false, "no other version")
+})
+
+test.case("caret allows changes that do not modify the leftmost non-zero digit", fn() {
+    test.ok(v.satisfies("1.2.3", "^1.2.3"), "same")
+    test.ok(v.satisfies("1.9.9", "^1.2.3"), "minor bump")
+    test.ok(v.satisfies("2.0.0", "^1.2.3") == false, "major bump excluded")
+    # For 0.x the minor acts as the major, which is the whole point of caret.
+    test.ok(v.satisfies("0.2.9", "^0.2.3"), "0.2.x allowed")
+    test.ok(v.satisfies("0.3.0", "^0.2.3") == false, "0.3.0 excluded")
+})
+
+test.case("tilde allows patch-level changes only", fn() {
+    test.ok(v.satisfies("1.2.9", "~1.2.3"), "patch bump")
+    test.ok(v.satisfies("1.3.0", "~1.2.3") == false, "minor bump excluded")
+})
+
+test.case("comparators and ranges combine", fn() {
+    test.ok(v.satisfies("1.5.0", ">=1.2.3"), "at least")
+    test.ok(v.satisfies("1.0.0", ">=1.2.3") == false, "below")
+    test.ok(v.satisfies("1.5.0", ">=1.2.3 <2.0.0"), "an AND of comparators")
+    test.ok(v.satisfies("2.0.0", ">=1.2.3 <2.0.0") == false, "upper bound is exclusive")
+    test.ok(v.satisfies("3.0.0", "^1.0.0 || ^3.0.0"), "an OR of ranges")
+    test.ok(v.satisfies("2.0.0", "^1.0.0 || ^3.0.0") == false, "neither branch")
+})
+
+test.case("star matches any release", fn() {
+    test.ok(v.satisfies("1.2.3", "*"), "star")
+    test.ok(v.satisfies("9.9.9", "*"), "star again")
+})
+
+test.case("a pre-release only satisfies a range that mentions one", fn() {
+    # Otherwise `^1.0.0` would silently pull in 2.0.0-alpha, which is the
+    # behaviour everyone complains about in other ecosystems.
+    test.ok(v.satisfies("1.2.3-alpha", "^1.0.0") == false, "no accidental pre-release")
+    test.ok(v.satisfies("1.2.3-alpha", ">=1.2.3-alpha"), "explicitly asked for")
+})
+
+# --- selection and bumping ---------------------------------------------------
+
+test.case("max_satisfying picks the highest match, or null", fn() {
+    available = ["1.0.0", "1.2.0", "1.9.3", "2.0.0", "2.1.0"]
+    test.eq(v.max_satisfying(available, "^1.0.0"), "1.9.3")
+    test.eq(v.max_satisfying(available, "^2.0.0"), "2.1.0")
+    test.eq(v.max_satisfying(available, "^3.0.0"), null)
+})
+
+test.case("inc bumps a release and clears what no longer applies", fn() {
+    test.eq(v.inc("1.2.3", "patch"), "1.2.4")
+    test.eq(v.inc("1.2.3", "minor"), "1.3.0")
+    test.eq(v.inc("1.2.3", "major"), "2.0.0")
+    # A pre-release is dropped: 1.2.3-alpha patched is the 1.2.3 release.
+    test.eq(v.inc("1.2.3-alpha", "patch"), "1.2.3")
+})
+
+test.case("string round-trips a parsed version, build metadata and all", fn() {
+    for text in ["1.2.3", "1.0.0-alpha.1", "1.0.0+build.5", "1.0.0-rc.1+exp.sha.5114f85"] {
+        test.eq(v.string_of(v.parse(text)), text)
+    }
+})

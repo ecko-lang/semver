@@ -1,0 +1,17 @@
+# semver - Semantic Versioning 2.0.0 in pure Ecko.
+#
+# Parse, compare, sort and match version ranges. Pure computation, no
+# capabilities.
+#
+#   import semver
+#
+#   semver.valid("1.2.3")                       # true
+#   semver.compare("1.0.0-alpha", "1.0.0")      # -1
+#   semver.satisfies("1.9.3", "^1.2.0")         # true
+#   semver.max_satisfying(tags, "^1.2.0")       # the newest match, or null
+#
+# Written against the specification at semver.org, including the parts a regex
+# would hide: leading zeroes, numeric-vs-alphanumeric pre-release ordering, and
+# build metadata being excluded from precedence.
+export * from "./parse.ecko"
+export * from "./ranges.ecko"

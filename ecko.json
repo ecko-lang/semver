@@ -1,0 +1,10 @@
+{
+  "module": "github.com/ecko-lang/semver",
+  "version": "0.9.5",
+  "entrypoint": "main.ecko",
+  "description": "Semantic Versioning 2.0.0: parse, compare, sort and match version ranges. Pure - no capabilities.",
+  "author": "Sean Nieuwoudt <sean@underwulf.com>",
+  "license": "MIT",
+  "capabilities": [],
+  "dependencies": {}
+}
