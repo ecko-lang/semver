@@ -6,8 +6,6 @@
 # metadata; build metadata never affects precedence; and a numeric pre-release
 # identifier always ranks below an alphanumeric one.
 
-import std.string as str
-
 ## The error every entry point raises for input that is not a version.
 export fn fail(message) {
     error({ kind: "semver", message: message })
