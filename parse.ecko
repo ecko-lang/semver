@@ -12,14 +12,14 @@ export fn fail(message) {
 }
 
 ## Is `s` a run of one or more ASCII digits?
-export fn is_numeric(s) {
+fn is_numeric(s) {
     if s == "" { return false }
     all(chars(s), fn(c) c >= "0" and c <= "9")
 }
 
 ## Identifier characters allowed in a pre-release or build part: alphanumerics
 ## and hyphen. Anything else - underscore, space, dot - ends the identifier.
-export fn is_ident(s) {
+fn is_ident(s) {
     if s == "" { return false }
     all(
         chars(s),
@@ -29,7 +29,7 @@ export fn is_ident(s) {
 
 ## A numeric field of the version core. Rejects a leading zero, so "01.1.1" is
 ## invalid rather than quietly becoming 1.1.1.
-export fn numeric_field(s, what) {
+fn numeric_field(s, what) {
     unless is_numeric(s) { fail("{what} must be a number, got '{s}'") }
     if len(s) > 1 and first(chars(s)) == "0" { fail("{what} must not have a leading zero: '{s}'") }
     int(s)
@@ -100,7 +100,7 @@ export fn string_of(p) {
 # --- precedence --------------------------------------------------------------
 
 ## -1, 0 or 1 for a < b, a == b, a > b.
-export fn cmp_int(a, b) {
+fn cmp_int(a, b) {
     if a < b { return -1 }
     if a > b { return 1 }
     0
@@ -108,7 +108,7 @@ export fn cmp_int(a, b) {
 
 ## Compare two pre-release identifiers. Numeric always ranks below
 ## alphanumeric, and two numerics compare as numbers (spec §11.4.3).
-export fn cmp_identifier(a, b) {
+fn cmp_identifier(a, b) {
     a_num = type_of(a) == "int"
     b_num = type_of(b) == "int"
     if a_num and b_num { return cmp_int(a, b) }
@@ -120,7 +120,7 @@ export fn cmp_identifier(a, b) {
 ## Compare two pre-release lists. An empty list means "this is a release",
 ## which outranks any pre-release (§11.3); otherwise identifiers are compared
 ## left to right and a longer list wins the tie (§11.4.4).
-export fn cmp_prerelease(a, b) {
+fn cmp_prerelease(a, b) {
     if len(a) == 0 and len(b) == 0 { return 0 }
     if len(a) == 0 { return 1 }
     if len(b) == 0 { return -1 }

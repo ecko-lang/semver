@@ -13,5 +13,8 @@
 # Written against the specification at semver.org, including the parts a regex
 # would hide: leading zeroes, numeric-vs-alphanumeric pre-release ordering, and
 # build metadata being excluded from precedence.
-export * from "./parse.ecko"
+# `fail` stays exported by parse.ecko because ranges.ecko calls it across the
+# file boundary, but it is an error helper rather than API - a blanket
+# `export *` here would publish it as `semver.fail`.
+export { identifiers, identifier, parse, valid, string_of, compare, sort, eq, gt, lt, inc } from "./parse.ecko"
 export * from "./ranges.ecko"
