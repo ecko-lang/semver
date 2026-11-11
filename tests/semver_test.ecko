@@ -185,3 +185,117 @@ test.case("string round-trips a parsed version, build metadata and all", fn() {
         test.eq(v.string_of(v.parse(text)), text)
     }
 })
+
+# --- audit fixes: errors, ranges, inc ------------------------------------------
+
+fn failure_of(f) {
+    try {
+        f()
+        null
+    } catch (e) { { kind: get(e, "kind"), reason: get(e, "reason") } }
+}
+
+test.case("a hyphen range is refused rather than quietly misread", fn() {
+    test.eq(
+        failure_of(fn() v.satisfies("1.5.0", "1.2.3 - 2.0.0")),
+        { kind: "semver", reason: "unsupported_range" },
+    )
+})
+
+test.case("partial and x-ranges are refused with a clear reason", fn() {
+    test.eq(
+        failure_of(fn() v.satisfies("1.2.3", "~1.2")),
+        { kind: "semver", reason: "unsupported_range" },
+    )
+    test.eq(
+        failure_of(fn() v.satisfies("1.2.3", "1.x")),
+        { kind: "semver", reason: "unsupported_range" },
+    )
+    test.eq(failure_of(fn() v.parse_range("^1")), { kind: "semver", reason: "unsupported_range" })
+})
+
+test.case("a malformed comparator is refused when the range is parsed", fn() {
+    test.eq(failure_of(fn() v.parse_range(">=banana")), { kind: "semver", reason: "bad_version" })
+    test.eq(failure_of(fn() v.parse_range("")), { kind: "semver", reason: "bad_range" })
+})
+
+test.case("an operator separated from its version by a space still applies", fn() {
+    test.ok(v.satisfies("1.2.5", ">= 1.2.3"), "spaced >=")
+    test.ok(v.satisfies("1.2.5", ">= 1.2.3 < 2.0.0"), "spaced AND")
+    test.ok(v.satisfies("1.2.5", "^ 1.2.3"), "spaced caret")
+    test.ok(v.satisfies("3.0.0", ">= 1.2.3 < 2.0.0") == false, "spaced upper bound")
+    test.eq(failure_of(fn() v.satisfies("1.2.5", ">=")), { kind: "semver", reason: "bad_range" })
+})
+
+test.case("inc of a pre-release lands on the release it leads to", fn() {
+    test.eq(v.inc("1.2.0-rc.1", "minor"), "1.2.0")
+    test.eq(v.inc("1.2.3-rc.1", "minor"), "1.3.0")
+    test.eq(v.inc("2.0.0-rc.1", "major"), "2.0.0")
+    test.eq(v.inc("2.1.0-rc.1", "major"), "3.0.0")
+    test.eq(v.inc("1.2.3-rc.1", "patch"), "1.2.3")
+})
+
+test.case("numbers past a 64-bit integer are semver errors, not crashes", fn() {
+    test.eq(
+        failure_of(fn() v.parse("99999999999999999999.0.0")),
+        { kind: "semver", reason: "out_of_range" },
+    )
+    test.eq(
+        failure_of(fn() v.inc("9223372036854775807.0.0", "major")),
+        { kind: "semver", reason: "out_of_range" },
+    )
+    test.eq(
+        failure_of(fn() v.satisfies("1.0.0", "^9223372036854775807.0.0")),
+        { kind: "semver", reason: "out_of_range" },
+    )
+})
+
+test.case("parse errors carry reason bad_version", fn() {
+    test.eq(failure_of(fn() v.parse("1.2")), { kind: "semver", reason: "bad_version" })
+    test.eq(failure_of(fn() v.parse("01.1.1")), { kind: "semver", reason: "bad_version" })
+})
+
+test.case("wrong-typed arguments are bug errors raised at the boundary", fn() {
+    test.eq(failure_of(fn() v.parse(5)), { kind: "bug", reason: "bad_argument" })
+    test.eq(failure_of(fn() v.compare(1, 2)), { kind: "bug", reason: "bad_argument" })
+    test.eq(failure_of(fn() v.inc("1.2.3", "micro")), { kind: "bug", reason: "bad_argument" })
+    test.eq(failure_of(fn() v.satisfies("1.2.3", 5)), { kind: "bug", reason: "bad_argument" })
+    test.eq(
+        failure_of(fn() v.max_satisfying("1.2.3", "^1.0.0")),
+        { kind: "bug", reason: "bad_argument" },
+    )
+    test.eq(failure_of(fn() v.string_of("1.2.3")), { kind: "bug", reason: "bad_argument" })
+})
+
+test.case("max_satisfying and min_satisfying skip entries that are not versions", fn() {
+    test.eq(v.max_satisfying(["1.0.0", "latest", "1.2.0"], "^1.0.0"), "1.2.0")
+    test.eq(v.min_satisfying(["latest", "1.2.0", "1.0.0"], "^1.0.0"), "1.0.0")
+    test.eq(v.max_satisfying(["v1.0.0", "v1.2.0"], "^1.0.0"), null)
+})
+
+test.case("gt, lt, eq and min_satisfying", fn() {
+    test.ok(v.gt("1.0.1", "1.0.0"), "gt")
+    test.ok(v.gt("1.0.0", "1.0.0") == false, "gt equal")
+    test.ok(v.lt("1.0.0-rc.1", "1.0.0"), "lt")
+    test.ok(v.eq("1.0.0+a", "1.0.0+b"), "eq ignores build")
+    test.eq(v.min_satisfying(["1.0.0", "1.2.0", "2.0.0"], "^1.1.0"), "1.2.0")
+    test.eq(v.min_satisfying(["1.0.0"], "^2.0.0"), null)
+})
+
+test.case("parse_range expands shorthand into comparators", fn() {
+    test.eq(
+        v.parse_range("^1.2.3 || ~0.1.0"),
+        [
+            [{ op: ">=", version: "1.2.3" }, { op: "<", version: "2.0.0" }],
+            [{ op: ">=", version: "0.1.0" }, { op: "<", version: "0.2.0" }],
+        ],
+    )
+    test.eq(v.parse_range(">= 1.0.0"), [[{ op: ">=", version: "1.0.0" }]])
+})
+
+test.case("internal helpers are not part of the public surface", fn() {
+    test.ok(failure_of(fn() v.identifiers) != null, "identifiers should not be exported")
+    test.ok(failure_of(fn() v.identifier) != null, "identifier should not be exported")
+    test.ok(failure_of(fn() v.comparators) != null, "comparators should not be exported")
+    test.ok(failure_of(fn() v.fail) != null, "fail should not be exported")
+})

@@ -6,15 +6,9 @@
 
 import "./main.ecko" as semver
 
-# Ecko string interpolation has no format specifiers, so columns are padded
-# explicitly.
-fn pad(text, width) {
-    mut out = string(text)
-    while len(out) < width {
-        out = out + " "
-    }
-    out
-}
+import std.str
+
+fn pad(text, width) = str.pad_end(string(text), width)
 
 # --- 1. is this a version at all? --------------------------------------------
 

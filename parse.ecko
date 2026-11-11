@@ -6,19 +6,29 @@
 # metadata; build metadata never affects precedence; and a numeric pre-release
 # identifier always ranks below an alphanumeric one.
 
-## The error every entry point raises for input that is not a version.
-export fn fail(message) {
-    error({ kind: "semver", message: message })
+# The largest value a version field can hold: Ecko's Int is 64-bit.
+MAX_FIELD = 9223372036854775807
+
+# The error every entry point raises for input that is not a version or a
+# range. Exported only so ranges.ecko can call it across the file boundary;
+# main.ecko does not re-export it.
+export fn fail(reason, message) {
+    error({ kind: "semver", reason: reason, message: message })
 }
 
-## Is `s` a run of one or more ASCII digits?
+# A programmer mistake: an argument of the wrong type or an unknown option.
+export fn bad_argument(message) {
+    error({ kind: "bug", reason: "bad_argument", message: message })
+}
+
+# Is `s` a run of one or more ASCII digits?
 fn is_numeric(s) {
     if s == "" { return false }
     all(chars(s), fn(c) c >= "0" and c <= "9")
 }
 
-## Identifier characters allowed in a pre-release or build part: alphanumerics
-## and hyphen. Anything else - underscore, space, dot - ends the identifier.
+# Identifier characters allowed in a pre-release or build part: alphanumerics
+# and hyphen. Anything else - underscore, space, dot - ends the identifier.
 fn is_ident(s) {
     if s == "" { return false }
     all(
@@ -27,70 +37,131 @@ fn is_ident(s) {
     )
 }
 
-## A numeric field of the version core. Rejects a leading zero, so "01.1.1" is
-## invalid rather than quietly becoming 1.1.1.
-fn numeric_field(s, what) {
-    unless is_numeric(s) { fail("{what} must be a number, got '{s}'") }
-    if len(s) > 1 and first(chars(s)) == "0" { fail("{what} must not have a leading zero: '{s}'") }
-    int(s)
+# A run of digits as an Int, or an `out_of_range` error past 64 bits.
+fn to_int(s, what) {
+    try {
+        int(s)
+    } catch (e) {
+        fail("out_of_range", "semver.parse: {what} '{s}' does not fit in a 64-bit integer")
+    }
 }
 
-## Split a pre-release or build string on dots, checking each identifier.
-## Numeric pre-release identifiers become ints so they compare numerically;
-## build identifiers stay text, since build metadata is never compared.
-export fn identifiers(s, numeric_matters, what) {
-    if s == "" { fail("{what} must not be empty") }
-    parts = split(s, ".")
-    map(parts, fn(p) identifier(p, numeric_matters, what))
+# A numeric field of the version core. Rejects a leading zero, so "01.1.1" is
+# invalid rather than quietly becoming 1.1.1.
+fn numeric_field(s, what, text) {
+    unless is_numeric(s) {
+        fail("bad_version", "semver.parse: {what} must be a number, got '{s}' in '{text}'")
+    }
+    if len(s) > 1 and first(chars(s)) == "0" {
+        fail(
+            "bad_version",
+            "semver.parse: {what} must not have a leading zero, got '{s}' in '{text}'",
+        )
+    }
+    to_int(s, what)
 }
 
-## One identifier from a dot-separated list.
-export fn identifier(p, numeric_matters, what) {
-    unless is_ident(p) { fail("{what} identifier '{p}' has a character outside [0-9A-Za-z-]") }
+# Split a pre-release or build string on dots, checking each identifier.
+# Numeric pre-release identifiers become ints so they compare numerically;
+# build identifiers stay text, since build metadata is never compared.
+fn identifiers(s, numeric_matters, what, text) {
+    if s == "" { fail("bad_version", "semver.parse: {what} must not be empty in '{text}'") }
+    map(split(s, "."), fn(p) identifier(p, numeric_matters, what, text))
+}
+
+# One identifier from a dot-separated list.
+fn identifier(p, numeric_matters, what, text) {
+    unless is_ident(p) {
+        fail(
+            "bad_version",
+            "semver.parse: {what} identifier '{p}' in '{text}' has a character outside [0-9A-Za-z-]",
+        )
+    }
     unless numeric_matters { return p }
     unless is_numeric(p) { return p }
     # Numeric identifiers must not carry a leading zero (spec §9).
-    if len(p) > 1 and first(chars(p)) == "0" { fail("{what} identifier '{p}' has a leading zero") }
-    int(p)
+    if len(p) > 1 and first(chars(p)) == "0" {
+        fail("bad_version", "semver.parse: {what} identifier '{p}' in '{text}' has a leading zero")
+    }
+    to_int(p, "{what} identifier")
 }
 
-## parse("1.2.3-rc.1+build.5") -> { major, minor, patch, prerelease, build }.
-## Raises `{ kind: "semver" }` for anything that is not a valid version.
+## Parse a version into `{ major, minor, patch, prerelease, build }`.
+##
+## `prerelease` is a list whose numeric identifiers are Ints and the rest
+## Strings; `build` is a list of Strings. A leading `v` is not accepted.
+##
+## errors: `semver`/`bad_version` when `text` is not a valid version;
+## `semver`/`out_of_range` when a number does not fit in 64 bits;
+## `bug`/`bad_argument` when `text` is not a string.
+##
+## example:
+##   semver.parse("1.2.3-rc.1+build.5")
+##   # {build: [build, 5], major: 1, minor: 2, patch: 3, prerelease: [rc, 1]}
 export fn parse(text) {
-    unless type_of(text) == "string" { fail("a version must be a string") }
+    unless type_of(text) == "string" {
+        bad_argument("semver.parse: text must be a string, got {type_of(text)}")
+    }
     # Build metadata is separated first: it may itself contain hyphens, so
     # splitting on "-" before "+" would mis-slice "1.0.0+exp.sha-1".
     plus = split(text, "+")
-    if len(plus) > 2 { fail("more than one '+' in '{text}'") }
-    build = if len(plus) == 2 { identifiers(plus[1], false, "build metadata") } else { [] }
+    if len(plus) > 2 { fail("bad_version", "semver.parse: more than one '+' in '{text}'") }
+    build = if len(plus) == 2 { identifiers(plus[1], false, "build metadata", text) } else { [] }
 
     rest = plus[0]
     dash = index_of(chars(rest), "-")
     core = if dash < 0 { rest } else { join(take(chars(rest), dash), "") }
     pre_text = if dash < 0 { null } else { join(drop(chars(rest), dash + 1), "") }
-    prerelease = if is_null(pre_text) { [] } else { identifiers(pre_text, true, "pre-release") }
+    prerelease = if is_null(pre_text) {
+        []
+    } else {
+        identifiers(pre_text, true, "pre-release", text)
+    }
 
     nums = split(core, ".")
-    unless len(nums) == 3 { fail("a version needs major.minor.patch, got '{text}'") }
+    unless len(nums) == 3 {
+        fail("bad_version", "semver.parse: a version needs major.minor.patch, got '{text}'")
+    }
     {
-        major: numeric_field(nums[0], "major"),
-        minor: numeric_field(nums[1], "minor"),
-        patch: numeric_field(nums[2], "patch"),
+        major: numeric_field(nums[0], "major", text),
+        minor: numeric_field(nums[1], "minor", text),
+        patch: numeric_field(nums[2], "patch", text),
         prerelease: prerelease,
         build: build,
     }
 }
 
-## Is `text` a valid version? The total form of `parse`.
+## Whether `text` is a valid version: the total form of `parse`.
+##
+## A value that is not a string is not a version, so this returns `false`
+## for it rather than raising.
+##
+## example:
+##   semver.valid("01.1.1")   # false - leading zero
 export fn valid(text) {
+    unless type_of(text) == "string" { return false }
     try {
         _ = parse(text)
         true
     } catch (e) { false }
 }
 
+# Is `p` shaped like a value `parse` returns?
+fn is_parsed(p) {
+    unless type_of(p) == "map" { return false }
+    all(["major", "minor", "patch", "prerelease", "build"], fn(k) has(p, k))
+}
+
 ## Render a parsed version back to text, build metadata included.
+##
+## errors: `bug`/`bad_argument` when `p` is not a map `parse` returned.
+##
+## example:
+##   semver.string_of(semver.parse("1.0.0-rc.1+exp"))   # 1.0.0-rc.1+exp
 export fn string_of(p) {
+    unless is_parsed(p) {
+        bad_argument("semver.string_of: p must be a parsed version, got {type_of(p)}")
+    }
     core = "{p.major}.{p.minor}.{p.patch}"
     pre = if len(p.prerelease) == 0 { "" } else { "-" + join(map(p.prerelease, string), ".") }
     meta = if len(p.build) == 0 { "" } else { "+" + join(map(p.build, string), ".") }
@@ -99,15 +170,15 @@ export fn string_of(p) {
 
 # --- precedence --------------------------------------------------------------
 
-## -1, 0 or 1 for a < b, a == b, a > b.
+# -1, 0 or 1 for a < b, a == b, a > b.
 fn cmp_int(a, b) {
     if a < b { return -1 }
     if a > b { return 1 }
     0
 }
 
-## Compare two pre-release identifiers. Numeric always ranks below
-## alphanumeric, and two numerics compare as numbers (spec §11.4.3).
+# Compare two pre-release identifiers. Numeric always ranks below
+# alphanumeric, and two numerics compare as numbers (spec §11.4.3).
 fn cmp_identifier(a, b) {
     a_num = type_of(a) == "int"
     b_num = type_of(b) == "int"
@@ -117,9 +188,9 @@ fn cmp_identifier(a, b) {
     cmp_int(a, b)
 }
 
-## Compare two pre-release lists. An empty list means "this is a release",
-## which outranks any pre-release (§11.3); otherwise identifiers are compared
-## left to right and a longer list wins the tie (§11.4.4).
+# Compare two pre-release lists. An empty list means "this is a release",
+# which outranks any pre-release (§11.3); otherwise identifiers are compared
+# left to right and a longer list wins the tie (§11.4.4).
 fn cmp_prerelease(a, b) {
     if len(a) == 0 and len(b) == 0 { return 0 }
     if len(a) == 0 { return 1 }
@@ -132,11 +203,27 @@ fn cmp_prerelease(a, b) {
     cmp_int(len(a), len(b))
 }
 
-## compare(a, b) -> -1, 0 or 1. Accepts text or already-parsed versions.
-## Build metadata is ignored, exactly as the spec requires (§10).
+# Text or an already-parsed version, as a parsed version.
+fn as_parsed(x, who, name) {
+    if type_of(x) == "string" { return parse(x) }
+    if is_parsed(x) { return x }
+    bad_argument("{who}: {name} must be a version string or a parsed version, got {type_of(x)}")
+}
+
+## -1, 0 or 1 as `a` is lower than, equal to or higher than `b` by precedence.
+##
+## Accepts text or already-parsed versions. Build metadata is ignored, exactly
+## as the spec requires (§10).
+##
+## errors: `semver`/`bad_version` or `semver`/`out_of_range` when a version
+## does not parse; `bug`/`bad_argument` when an argument is neither a string
+## nor a parsed version.
+##
+## example:
+##   semver.compare("1.0.0-alpha", "1.0.0")   # -1
 export fn compare(a, b) {
-    x = if type_of(a) == "string" { parse(a) } else { a }
-    y = if type_of(b) == "string" { parse(b) } else { b }
+    x = as_parsed(a, "semver.compare", "a")
+    y = as_parsed(b, "semver.compare", "b")
     for pair in [[x.major, y.major], [x.minor, y.minor], [x.patch, y.patch]] {
         c = cmp_int(pair[0], pair[1])
         unless c == 0 { return c }
@@ -144,43 +231,88 @@ export fn compare(a, b) {
     cmp_prerelease(x.prerelease, y.prerelease)
 }
 
-## Ascending order by precedence.
+## The versions in ascending order of precedence; versions of equal
+## precedence keep their input order.
 ##
-## `sort_with` takes the comparator directly. `sort_by` could not express this:
-## a pre-release list mixes numeric and alphanumeric identifiers whose ordering
-## depends on their types, which is not a value any key function can return.
+## errors: `semver`/`bad_version` when an entry does not parse;
+## `bug`/`bad_argument` when `versions` is not a list.
+##
+## example:
+##   semver.sort(["2.0.0", "1.0.0-rc.1", "1.0.0"])   # [1.0.0-rc.1, 1.0.0, 2.0.0]
 export fn sort(versions) {
+    unless type_of(versions) == "list" {
+        bad_argument("semver.sort: versions must be a list, got {type_of(versions)}")
+    }
+    # `sort_by` could not express this: a pre-release list mixes numeric and
+    # alphanumeric identifiers whose ordering depends on their types, which is
+    # not a value any key function can return.
     sort_with(versions, compare)
 }
 
-## a == b by precedence, ignoring build metadata.
+## Whether `a` and `b` have equal precedence (build metadata ignored).
+##
+## errors: as `compare`.
+##
+## example:
+##   semver.eq("1.0.0+a", "1.0.0+b")   # true
 export fn eq(a, b) = compare(a, b) == 0
 
-## a > b by precedence.
+## Whether `a` has higher precedence than `b`.
+##
+## errors: as `compare`.
+##
+## example:
+##   semver.gt("1.0.1", "1.0.0")   # true
 export fn gt(a, b) = compare(a, b) > 0
 
-## a < b by precedence.
+## Whether `a` has lower precedence than `b`.
+##
+## errors: as `compare`.
+##
+## example:
+##   semver.lt("1.0.0-rc.1", "1.0.0")   # true
 export fn lt(a, b) = compare(a, b) < 0
 
-## inc("1.2.3", "minor") -> "1.3.0". Bumping drops any pre-release and build
-## metadata: they described the version being left behind, not the new one.
+# n + 1, or an `out_of_range` error when n is already the largest Int.
+fn bump(n, what, text) {
+    if n == MAX_FIELD {
+        fail("out_of_range", "semver.inc: cannot bump the {what} of '{text}' past a 64-bit integer")
+    }
+    n + 1
+}
+
+## The next version after `text` for `part`, one of "major", "minor" or "patch".
+##
+## Bumping drops build metadata and any pre-release. A pre-release already
+## comes before its release, so bumping one lands on that release when the
+## parts below `part` are zero, as npm does: `1.2.0-rc.1` bumped by minor is
+## `1.2.0`, `2.0.0-rc.1` bumped by major is `2.0.0`, and `1.2.3-rc.1` bumped
+## by patch is `1.2.3`.
+##
+## errors: `semver`/`bad_version` when `text` does not parse;
+## `semver`/`out_of_range` when the bumped number would pass 64 bits;
+## `bug`/`bad_argument` when `part` is not one of the three.
+##
+## example:
+##   semver.inc("1.2.3", "minor")        # 1.3.0
+##   semver.inc("1.2.0-rc.1", "minor")   # 1.2.0
 export fn inc(text, part) {
+    unless part == "major" or part == "minor" or part == "patch" {
+        bad_argument("semver.inc: part must be 'major', 'minor' or 'patch', got '{part}'")
+    }
     p = parse(text)
+    pre = len(p.prerelease) > 0
+    release = fn(major, minor, patch) string_of(
+        { major: major, minor: minor, patch: patch, prerelease: [], build: [] },
+    )
     if part == "major" {
-        return string_of({ major: p.major + 1, minor: 0, patch: 0, prerelease: [], build: [] })
+        if pre and p.minor == 0 and p.patch == 0 { return release(p.major, 0, 0) }
+        return release(bump(p.major, "major", text), 0, 0)
     }
     if part == "minor" {
-        return string_of(
-            { major: p.major, minor: p.minor + 1, patch: 0, prerelease: [], build: [] },
-        )
+        if pre and p.patch == 0 { return release(p.major, p.minor, 0) }
+        return release(p.major, bump(p.minor, "minor", text), 0)
     }
-    unless part == "patch" { fail("inc expects 'major', 'minor' or 'patch', got '{part}'") }
-    # A pre-release is already "before" its release, so patching 1.2.3-alpha
-    # lands on 1.2.3 rather than 1.2.4.
-    if len(p.prerelease) > 0 {
-        return string_of(
-            { major: p.major, minor: p.minor, patch: p.patch, prerelease: [], build: [] },
-        )
-    }
-    string_of({ major: p.major, minor: p.minor, patch: p.patch + 1, prerelease: [], build: [] })
+    if pre { return release(p.major, p.minor, p.patch) }
+    release(p.major, p.minor, bump(p.patch, "patch", text))
 }
